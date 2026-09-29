@@ -1,5 +1,12 @@
 # OfficeHub V1
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-white.svg">
+    <img src="assets/logo.svg" alt="OfficeHub logo" width="140">
+  </picture>
+</p>
+
 > **A Learning Project for Production-Grade Backend Engineering**
 
 OfficeHub is a learning project that simulates an internal company platform for **room booking and IT ticketing**.
