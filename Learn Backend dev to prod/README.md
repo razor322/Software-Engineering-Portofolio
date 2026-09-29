@@ -958,7 +958,7 @@ Modules such as `auth/`, `users/`, `rooms/`, `bookings/`, `tickets/`, and `audit
 
 ## 🚀 Getting Started
 
-Prerequisites: Docker Desktop, [uv](https://docs.astral.sh/uv/) *or* Python 3.12+ venv, Node 20+ with pnpm.
+Prerequisites: Docker Desktop, [uv](https://docs.astral.sh/uv/) *or* Python 3.10+ venv, Node 20+ with pnpm.
 
 ### 1. Database
 

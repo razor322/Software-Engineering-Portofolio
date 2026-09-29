@@ -15,6 +15,8 @@ anyio==4.15.1
     #   httpx
     #   starlette
     #   watchfiles
+async-timeout==5.0.1 ; python_full_version < '3.11'
+    # via asyncpg
 asyncpg==0.31.0
     # via backend
 certifi==2026.7.22
@@ -38,6 +40,10 @@ email-validator==2.3.0
     # via
     #   fastapi
     #   pydantic
+exceptiongroup==1.3.1 ; python_full_version < '3.11'
+    # via
+    #   anyio
+    #   pytest
 fastapi==0.141.1
     # via backend
 fastapi-cli==0.0.32
@@ -127,12 +133,17 @@ sentry-sdk==2.71.0
     # via fastapi-cloud-cli
 shellingham==1.5.4
     # via typer
-sqlalchemy==2.1.1
+sqlalchemy==2.0.54
     # via
     #   alembic
     #   backend
 starlette==1.7.0
     # via fastapi
+tomli==2.4.1 ; python_full_version < '3.11'
+    # via
+    #   alembic
+    #   fastapi-cli
+    #   pytest
 typer==0.27.2
     # via
     #   fastapi-cli
@@ -141,6 +152,7 @@ typing-extensions==4.16.0
     # via
     #   alembic
     #   anyio
+    #   exceptiongroup
     #   fastapi
     #   pydantic
     #   pydantic-core
@@ -149,6 +161,7 @@ typing-extensions==4.16.0
     #   sqlalchemy
     #   starlette
     #   typing-inspection
+    #   uvicorn
 typing-inspection==0.4.4
     # via
     #   fastapi
@@ -165,5 +178,7 @@ uvloop==0.22.1 ; platform_python_implementation != 'PyPy' and sys_platform != 'c
     # via uvicorn
 watchfiles==1.3.0
     # via uvicorn
-websockets==17.1
+websockets==16.1.1 ; python_full_version < '3.11'
+    # via uvicorn
+websockets==17.1 ; python_full_version >= '3.11'
     # via uvicorn
