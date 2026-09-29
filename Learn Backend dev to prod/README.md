@@ -1013,6 +1013,7 @@ Configuration lives in `backend/.env` and `frontend/.env` — copy from the `.en
 
 | URL | Purpose |
 |---|---|
+| http://localhost:8000/ | service status (`{"status": "running"}`) |
 | http://localhost:8000/api/v1/health/live | liveness |
 | http://localhost:8000/api/v1/health/ready | readiness (503 if DB down) |
 | http://localhost:8000/docs | OpenAPI docs |

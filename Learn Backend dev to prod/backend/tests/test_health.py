@@ -33,3 +33,15 @@ def test_unknown_path_uses_error_envelope():
 def test_client_supplied_request_id_is_propagated():
     response = client.get(f"{PREFIX}/health/live", headers={"X-Request-ID": "req_test_123"})
     assert response.headers["X-Request-ID"] == "req_test_123"
+
+
+def test_root_reports_running():
+    response = client.get("/")
+    assert response.status_code == 200
+    assert response.json() == {"status": "running"}
+
+
+def test_openapi_schema_is_served():
+    response = client.get("/openapi.json")
+    assert response.status_code == 200
+    assert response.json()["info"]["title"]

@@ -34,6 +34,12 @@ def create_app() -> FastAPI:
     )
     register_error_handlers(app)
     app.include_router(health_router, prefix=settings.api_v1_prefix)
+
+    # root only reports that the service is up; Swagger UI lives at /docs
+    @app.get("/", include_in_schema=False)
+    def root() -> dict[str, str]:
+        return {"status": "running"}
+
     return app
 
 
