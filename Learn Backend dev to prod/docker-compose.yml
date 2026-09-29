@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: officehub-postgres
+    environment:
+      POSTGRES_USER: officehub
+      POSTGRES_PASSWORD: officehub
+      POSTGRES_DB: officehub
+    ports:
+      # 5432 dipakai PostgreSQL lokal mesin ini, jadi Docker PG di 5433
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U officehub -d officehub"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
