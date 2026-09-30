@@ -98,15 +98,81 @@ The objective is to understand **why** each technology or architecture is needed
 
 What is actually built and verified in this repository right now:
 
+**Phase status**
+
+| Phase | Scope | Status |
+|---|---|---|
+| 00 | Project Initialization | ✅ done |
+| 01 | Backend Foundation | ✅ done |
+| 02 | Frontend Foundation | ✅ done |
+| 03 | Authentication | ✅ done |
+| 04 | Authorization & RBAC | ✅ done |
+| 05 | Room Management | ✅ done |
+| 06 | Booking | ✅ done |
+| 07+ | Ticketing, observability, security hardening, CI/CD | ⬜ not started |
+
 **Database**
 
-- PostgreSQL 17 running in Docker (`docker-compose.yml`) with a persistent volume and a healthcheck.
-- Migrations managed by **Alembic** (async template); the baseline migration runs cleanly against the real database.
+- PostgreSQL 17 as the development database. Development runs against the **local PostgreSQL
+  service**; `docker-compose.yml` remains available as an alternative.
+- Migrations managed by **Alembic** (async template); the baseline migration runs cleanly against
+  the real database.
+- `users`, `roles`, `user_roles`, and `sessions` tables (Phase 03).
+- `scripts/seed_dev.py` creates the three roles plus one development admin, idempotently.
+- Tests run against a **separate `officehub_test` database**, created and migrated automatically by
+  `tests/conftest.py`, so a test run can never touch development data.
 
 **Backend API (FastAPI)**
 
 - `GET /api/v1/health/live` — liveness probe: the process is up.
 - `GET /api/v1/health/ready` — readiness probe: verifies the database connection and returns **503** when the database is down, **200** when healthy.
+- **Authentication (Phase 03)** — `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`,
+  `GET /auth/csrf`, matching the API contract in the PRD.
+- **Session cookies, not tokens** — the session lives in an `HttpOnly`, `SameSite=Lax` cookie that
+  becomes `Secure` in production. The raw token is never stored: the database only holds a SHA-256
+  hash, so a database leak cannot hand out live sessions.
+- **Password hashing** — Argon2id via `argon2-cffi`. An unknown email is still verified against a
+  dummy hash so a missing account costs the same time as a wrong password.
+- **CSRF protection** — double-submit cookie. The browser reads the `csrf_token` cookie and echoes
+  it in `X-CSRF-Token`; the server compares them with `secrets.compare_digest` on every
+  `POST`/`PUT`/`PATCH`/`DELETE`.
+- **Session revocation** — logout stamps `revoked_at`; expired or revoked sessions authenticate
+  nothing.
+- **Authorization & RBAC (Phase 04)** — a permission catalog (`resource:action`), a role →
+  permission mapping, and a `require_permissions(...)` dependency. Routes ask for a permission
+  instead of naming a role, so renaming a role never touches a route.
+  - `GET /api/v1/users` — requires `users:read`. ADMIN passes, EMPLOYEE and IT_SUPPORT get **403**.
+  - `GET /api/v1/users/{user_id}` — ownership first: reading your own account needs no permission;
+    reading someone else's needs `users:read`.
+- **Room management (Phase 05)** — full CRUD behind permissions, plus the rooms UI.
+  - `GET /api/v1/rooms` — requires `rooms:read`. EMPLOYEE sees **ACTIVE** rooms only; whoever may
+    also change rooms sees the disabled ones as well.
+  - `POST`, `PATCH`, `DELETE` — `rooms:create` / `rooms:update` / `rooms:delete` (ADMIN).
+  - `PATCH` is a true partial update: `exclude_unset` keeps "field omitted" distinct from
+    "field set to null", so omitted fields survive. An empty patch is rejected with **422**.
+  - Frontend: `/rooms` list, `/rooms/new`, `/rooms/$roomId` (inline edit, enable/disable, delete).
+    The write controls render only for ADMIN — usability only; the API re-checks everything.
+- **Booking (Phase 06)** — creation, cancellation, availability, and a real transaction.
+  - **Overlap is a database constraint, not application code.**
+    `bookings_no_overlap_per_room` is a PostgreSQL exclusion constraint over
+    `btree_gist (room_id, tstzrange(start_time, end_time, '[)'))` with
+    `WHERE (status = 'CONFIRMED')`. A `SELECT … WHERE not exists` check has a race:
+    two requests can both find the slot free and both insert. Only the database can arbitrate.
+  - The service turns that refusal into **409 `BOOKING_CONFLICT`**, matched on SQLSTATE `23P01`
+    (SQLAlchemy replaces asyncpg's exception class with its own dialect wrapper).
+  - `[)` means **10:00–11:00 and 11:00–12:00 do not overlap** — back-to-back bookings are legal, and
+    there is a test that says so.
+  - **Booking and audit log commit together.** One `commit()`, one `rollback()`; a rejected booking
+    leaves no audit row claiming success. (Uses `commit()`/`rollback()` rather than
+    `async with session.begin()`, because SQLAlchemy begins a transaction implicitly on the first
+    read — `begin()` would raise as soon as the service fetched the room first.)
+  - Rejections use domain codes: `BOOKING_CONFLICT`, `ROOM_INACTIVE`, `INVALID_TIME_RANGE`,
+    `ROOM_NOT_FOUND`, `BOOKING_NOT_CANCELLABLE`.
+  - `GET /api/v1/bookings` — an employee sees only their own; an admin sees all. Filters: `room_id`,
+    `status`, `day`, with `page` / `page_size` and a `meta` block.
+  - `DELETE /api/v1/bookings/{id}` cancels (soft, 204) — ownership first, then the state change.
+- **Audit logging (Phase 06)** — `audit_logs` records actor, action, resource, before/after JSONB
+  snapshots, IP, user agent, and the request ID. `GET /api/v1/audit-logs` is ADMIN-only (`audit:read`).
 - **Request ID middleware** — every request receives an `X-Request-ID` (or reuses a well-formed client-provided one) which is echoed back in the response header.
 - **Uniform error envelope** for every failed request, following the API contract:
 
@@ -121,17 +187,34 @@ What is actually built and verified in this repository right now:
   ```
 
   Internal exception details are never exposed to clients.
-- **Environment-driven configuration** via pydantic-settings (`.env` files, 12-factor style) — database URL, CORS origins, log level, environment name.
+- **Environment-driven configuration** via pydantic-settings (`.env` files, 12-factor style) — database URL, CORS origins, log level, environment name, session TTL.
 - **Async database layer** — SQLAlchemy 2 async engine + session factory with `pool_pre_ping`, exposed to handlers through a dependency.
 
 **Frontend**
 
-- Vite + React + TypeScript scaffold with a passing production build (`pnpm build`).
+- Vite + React 19 + TypeScript with **TanStack Router** (code-based routes), **TanStack Query**,
+  **Axios**, and **Tailwind CSS v4**.
+- shadcn/ui-style primitives (`Button`, `Input`, `Label`, `Card`) with CSS-variable design tokens, so
+  restyling happens in `src/index.css` rather than in component code.
+- **API client** — one Axios instance with `withCredentials`, plus a request interceptor that attaches
+  the CSRF header on unsafe methods, and an `ApiError` type that reads the backend's error envelope.
+- **Dashboard shell** — sidebar, header, sign-out, and a protected route.
+- **Rooms UI (Phase 05)** — list, create form, and detail page with inline edit.
+- **Booking workflow (Phase 06)** — availability panel and booking form on the room page, plus
+  `/bookings` with per-booking cancel.
+- **Route guard** — a pathless `app` layout route resolves the session in `beforeLoad` and
+  redirects anonymous visitors to `/login`, so a protected page never flashes.
+- **Error boundary and loading states** — the root route owns a `notFoundComponent` and an
+  `errorComponent`; routes declare `pendingComponent`.
 
 **Engineering baseline**
 
-- `ruff` lint and a `pytest` smoke suite (health probes, error envelope, request ID propagation) — all green.
+- `ruff` lint and a `pytest` suite — **68 passing**: health probes, error envelope, request ID
+  propagation, login/logout/session/CSRF, the role matrix, room CRUD, booking overlap rules,
+  ownership, and audit atomicity.
 - `uv.lock` for reproducible installs with uv, plus `requirements.txt` exported from the lockfile so the app can also be installed in a plain venv with pip.
+- `pnpm build` (TypeScript project build + Vite production build) and `oxlint` both pass.
+
 
 ---
 
@@ -241,13 +324,15 @@ Not:
 
 Decisions already made (and built) in this codebase — each one is a small problem with a concrete solution.
 
-**1. Port 5432 was already taken**
+**1. The connection string lives in configuration**
 
-The machine runs a local PostgreSQL service on 5432, so the Docker database is published on **5433** instead. The connection string lives in configuration (`.env`), never in code — changing environments means changing an environment variable, not a source file.
+Development points at the machine's local PostgreSQL service. The connection string is read from `.env`, never from code — switching environments means changing an environment variable, not a source file.
 
 **2. The first migration has no tables yet**
 
-An empty baseline migration was committed on purpose. It proves the entire pipeline — Alembic → PostgreSQL → `alembic_version` table → version tracking — before any business table exists. When real models arrive, their migration builds on a proven foundation.
+An empty baseline migration was committed on purpose. It proves the entire pipeline — Alembic → PostgreSQL → `alembic_version` table → version tracking — before any business table exists. The `users`/`roles`/`sessions` migration then builds on a proven foundation.
+
+**One trap this exposed:** the development database is shared with another project, so `alembic revision --autogenerate` cheerfully proposed dropping tables it had never heard of. The migration was hand-trimmed down to the four tables it owns. A migration must only ever touch what it created.
 
 **3. Liveness is not readiness**
 
@@ -276,11 +361,49 @@ All failures return the same envelope with a stable machine-readable `code`, a s
 
 Authentication is designed around **HttpOnly, Secure cookies** managed by the server — never tokens in `localStorage`, which any injected script can read. Cookie-based sessions require CSRF protection, which is part of the design.
 
-**7. The backend is the security boundary**
+Two different secrets, two different strategies:
+
+```text
+password              → Argon2id, slow and memory-hard, because a human chose it
+session / csrf token  → SHA-256, because we generated it from a CSPRNG
+```
+
+The database stores only the **hash** of a session token. A dump of the `sessions` table therefore
+hands an attacker nothing usable, which is why a leaked backup does not mean a mass logout.
+
+CSRF uses the **double-submit cookie** pattern: the server sets a readable `csrf_token` cookie, the
+client echoes it in `X-CSRF-Token`, and the server compares the two with
+`secrets.compare_digest`. An attacker on another origin can make the browser send the request but
+cannot read the cookie to copy it into a header.
+
+**7. Login says nothing about what failed**
+
+A wrong password and an unknown account return the same status, the same code, and the same message.
+An unknown email is still verified against a dummy hash, so the two cases also take the same time.
+Login throttling and rate limiting are *not* implemented yet — that is Phase 08.
+
+**8. The backend is the security boundary**
 
 Hiding a button in the frontend is a usability decision, not a security one. Every protected endpoint must authenticate, resolve the user's role, check the permission, and check resource ownership before executing logic.
 
-**8. Reproducible installs, two ways**
+```text
+Request
+  ↓
+authenticated?          get_current_user      → 401
+  ↓
+has the permission?      require_permissions   → 403
+  ↓
+owns the resource?       per-route check       → 403
+  ↓
+handler
+```
+
+Two guards rather than one, because they answer different questions. A permission says *"this role
+may list every account"*; ownership says *"this account may read this particular record"*, and only
+the route knows what "own" means for its data. `GET /users/{user_id}` shows both: reading yourself
+needs no permission at all.
+
+**9. Reproducible installs, two ways**
 
 `uv.lock` pins the exact environment for uv users; `requirements.txt` is exported from the same lockfile for plain `pip install -r`. Same versions either way — no "works on my machine".
 
@@ -915,10 +1038,32 @@ As it exists in this repository today:
 ├── frontend/
 │   ├── public/
 │   ├── src/
-│   │   ├── App.tsx
-│   │   ├── App.css
+│   │   ├── components/
+│   │   │   ├── app-shell.tsx      # sidebar + header
+│   │   │   └── ui/                # button, input, label, card
+│   │   ├── features/
+│   │   │   ├── auth/          # session query, login/logout, requireUser guard
+│   │   │   ├── bookings/      # booking queries + availability/book form panel
+│   │   │   └── rooms/         # room queries and mutations
+│   │   ├── lib/
+│   │   │   ├── api/client.ts      # axios instance + CSRF interceptor
+│   │   │   ├── api/errors.ts      # ApiError over the error envelope
+│   │   │   └── utils.ts           # cn()
+│   │   ├── routes/
+│   │   │   ├── __root.tsx         # layout, notFound, error boundary
+│   │   │   ├── app.tsx            # pathless authenticated layout + guard
+│   │   │   ├── dashboard.tsx
+│   │   │   ├── index.tsx          # redirects to /dashboard
+│   │   │   ├── login.tsx
+│   │   │   ├── bookings/
+│   │   │   │   └── index.tsx      # my bookings + cancel
+│   │   │   └── rooms/
+│   │   │       ├── index.tsx      # list
+│   │   │       ├── new.tsx        # admin create
+│   │   │       └── $roomId.tsx    # detail + inline edit
+│   │   ├── index.css              # tailwind + design tokens
 │   │   ├── main.tsx
-│   │   └── index.css
+│   │   └── router.tsx             # code-based route tree
 │   ├── .env.example
 │   ├── package.json
 │   ├── pnpm-lock.yaml
@@ -932,42 +1077,85 @@ As it exists in this repository today:
 │   │   │   ├── config.py      # pydantic-settings configuration
 │   │   │   ├── database.py    # async engine + session
 │   │   │   ├── errors.py      # error envelope handlers
-│   │   │   ├── middleware.py  # X-Request-ID middleware
+│   │   │   ├── middleware.py  # X-Request-ID + CSRF middleware
+│   │   │   ├── permissions.py # permission catalog + role mapping (Phase 04)
+│   │   │   ├── security.py    # argon2 hashing, token generation
 │   │   │   └── base.py        # shared declarative Base for models
+│   │   ├── auth/
+│   │   │   ├── models.py      # User, Role, Session, user_roles
+│   │   │   ├── schemas.py     # request/response schemas
+│   │   │   ├── repository.py  # database access
+│   │   │   ├── service.py     # authenticate / session lifecycle
+│   │   │   ├── dependencies.py# get_current_user, require_permissions
+│   │   │   └── router.py      # /auth/* endpoints
+│   │   ├── audit/
+│   │   │   ├── models.py       # AuditLog + AuditAction
+│   │   │   ├── router.py       # /audit-logs (ADMIN)
+│   │   │   └── service.py      # record() — never commits, caller owns the transaction
+│   │   ├── bookings/
+│   │   │   ├── models.py       # Booking + no-overlap exclusion constraint
+│   │   │   ├── repository.py
+│   │   │   ├── router.py       # /bookings, availability
+│   │   │   ├── schemas.py
+│   │   │   └── service.py      # create/cancel inside one transaction
+│   │   ├── rooms/
+│   │   │   ├── models.py       # Room + RoomStatus
+│   │   │   ├── repository.py
+│   │   │   ├── router.py       # /rooms/* CRUD
+│   │   │   └── schemas.py      # create / partial update / response
+│   │   ├── users/
+│   │   │   ├── repository.py
+│   │   │   ├── router.py      # /users/* — first RBAC-protected endpoints
+│   │   │   └── schemas.py
 │   │   └── health/
 │   │       └── router.py      # /health/live + /health/ready
 │   │
 │   ├── migrations/            # Alembic (async env.py, versions/)
+│   ├── scripts/seed_dev.py    # roles + one development admin
 │   ├── tests/
-│   │   └── test_health.py
+│   │   │   ├── conftest.py        # separate test database + fixtures
+│   │   │   ├── test_auth.py
+│   │   │   ├── test_audit.py
+│   │   │   ├── test_bookings.py
+│   │   │   ├── test_health.py
+│   │   │   ├── test_rooms.py
+│   │   │   └── test_users.py      # the role matrix
 │   ├── .env.example
 │   ├── pyproject.toml
 │   ├── requirements.txt
 │   ├── uv.lock
 │   └── alembic.ini
 │
-├── docker-compose.yml         # PostgreSQL 17 for development
+├── docker-compose.yml         # optional PostgreSQL 17 alternative
 ├── .editorconfig
 ├── .gitignore
 └── README.md
 ```
 
-Modules such as `auth/`, `users/`, `rooms/`, `bookings/`, `tickets/`, and `audit/` will be added under `backend/app/` as they are implemented.
+Modules such as `rooms/`, `bookings/`, `tickets/`, and `audit/` will be added under `backend/app/`
+as they are implemented.
 
 ---
 
 ## 🚀 Getting Started
 
-Prerequisites: Docker Desktop, [uv](https://docs.astral.sh/uv/) *or* Python 3.10+ venv, Node 20+ with pnpm.
+Prerequisites: [uv](https://docs.astral.sh/uv/) *or* Python 3.10+ venv, Node 20+ with pnpm, and a
+running PostgreSQL 17.
 
 ### 1. Database
 
-```sh
-docker compose up -d
+Development uses the **local PostgreSQL service** on port 5432. Point `DATABASE_URL` at your
+database in `backend/.env`, then create it once:
+
+```sql
+CREATE DATABASE officehub;
 ```
 
-Postgres runs on **port 5433** (5432 is taken by the local PostgreSQL service on this machine).
-Credentials: `officehub` / `officehub` / db `officehub`.
+Optional alternative — the containerized database:
+
+```sh
+docker compose up -d     # published on 5433 because 5432 is taken locally
+```
 
 ### 2. Backend
 
@@ -976,8 +1164,9 @@ Option A — uv (recommended):
 ```sh
 cd backend
 uv sync
-uv run alembic upgrade head
-uv run uvicorn app.main:app --reload
+uv run python -m scripts/seed_dev                      # roles + a dev admin
+uv run python -m alembic upgrade head
+uv run python -m uvicorn app.main:app --reload
 ```
 
 Option B — plain venv + pip:
@@ -987,15 +1176,30 @@ cd backend
 python -m venv .venv
 .venv\Scripts\activate        # Windows
 pip install -r requirements.txt
-alembic upgrade head
-uvicorn app.main:app --reload
+python -m scripts/seed_dev
+python -m alembic upgrade head
+python -m uvicorn app.main:app --reload
 ```
+
+> Use `python -m alembic` / `python -m uvicorn` rather than the bare console scripts — on some
+> Windows + uv combinations the generated shims exit with status 1 and no output.
 
 Regenerate `requirements.txt` after changing dependencies:
 
 ```sh
 uv export --no-hashes --no-emit-project --output-file requirements.txt
 ```
+
+The seed script creates one development account per role and prints the shared password (default
+`ChangeMe123!`):
+
+| Email | Role |
+|---|---|
+| `admin@officehub.dev` | ADMIN |
+| `support@officehub.dev` | IT_SUPPORT |
+| `employee@officehub.dev` | EMPLOYEE |
+
+Change them before this reaches any shared environment.
 
 ### 3. Frontend
 
@@ -1005,19 +1209,41 @@ pnpm install
 pnpm dev
 ```
 
+Open <http://localhost:5173>, sign in with the seeded admin, and you land on the dashboard shell.
+
 Configuration lives in `backend/.env` and `frontend/.env` — copy from the `.env.example` files.
 
 ---
 
 ## Endpoints
 
-| URL | Purpose |
-|---|---|
-| http://localhost:8000/ | service status (`{"status": "running"}`) |
-| http://localhost:8000/api/v1/health/live | liveness |
-| http://localhost:8000/api/v1/health/ready | readiness (503 if DB down) |
-| http://localhost:8000/docs | OpenAPI docs |
-| http://localhost:5173 | frontend dev server |
+| Method | URL | Purpose |
+|---|---|---|
+| GET | http://localhost:8000/ | service status (`{"status": "running"}`) |
+| GET | http://localhost:8000/api/v1/health/live | liveness |
+| GET | http://localhost:8000/api/v1/health/ready | readiness (503 if DB down) |
+| POST | http://localhost:8000/api/v1/auth/login | set session cookie, returns the user |
+| POST | http://localhost:8000/api/v1/auth/logout | revoke the session (204) |
+| GET | http://localhost:8000/api/v1/auth/me | the signed-in user, 401 otherwise |
+| GET | http://localhost:8000/api/v1/auth/csrf | CSRF token for the double-submit header |
+| GET | http://localhost:8000/api/v1/users | list users — requires `users:read` (ADMIN) |
+| GET | http://localhost:8000/api/v1/users/{user_id} | read a user — own account, or `users:read` |
+| GET | http://localhost:8000/api/v1/rooms | list rooms — requires `rooms:read` |
+| POST | http://localhost:8000/api/v1/rooms | create room — requires `rooms:create` |
+| GET | http://localhost:8000/api/v1/rooms/{room_id} | room details |
+| PATCH | http://localhost:8000/api/v1/rooms/{room_id} | update / disable — requires `rooms:update` |
+| DELETE | http://localhost:8000/api/v1/rooms/{room_id} | delete room (204) — requires `rooms:delete` |
+| GET | http://localhost:8000/api/v1/bookings | list bookings — own, or all for ADMIN |
+| POST | http://localhost:8000/api/v1/bookings | book a room (201) — 409 on overlap |
+| DELETE | http://localhost:8000/api/v1/bookings/{booking_id} | cancel a booking (204) |
+| GET | http://localhost:8000/api/v1/rooms/{room_id}/availability | confirmed bookings for `?day=YYYY-MM-DD` |
+| GET | http://localhost:8000/api/v1/audit-logs | audit trail — requires `audit:read` (ADMIN) |
+| GET | http://localhost:8000/docs | OpenAPI docs |
+| — | http://localhost:5173 | frontend dev server |
+
+`POST`, `PUT`, `PATCH`, and `DELETE` require the CSRF header. The browser client handles this in
+`frontend/src/lib/api/client.ts`; from the command line, read `csrf_token` out of the cookie jar and
+send it as `X-CSRF-Token`.
 
 ---
 
@@ -1026,7 +1252,13 @@ Configuration lives in `backend/.env` and `frontend/.env` — copy from the `.en
 ```sh
 cd backend
 uv run ruff check .
-uv run pytest
+uv run python -m pytest
+```
+
+```sh
+cd frontend
+pnpm build     # tsc project build + production bundle
+pnpm lint
 ```
 
 ---
