@@ -9,11 +9,11 @@ class Settings(BaseSettings):
     app_name: str = "OfficeHub"
     environment: str = "development"  # development | staging | production
     api_v1_prefix: str = "/api/v1"
-    # ponytail: dev default points at docker-compose Postgres on 5433
-    # (5432 occupied by the local PostgreSQL service)
-    database_url: str = "postgresql+asyncpg://officehub:officehub@localhost:5433/officehub"
+    # dev runs against the machine's local PostgreSQL service (Docker compose is optional)
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/officehub"
     cors_origins: str = "http://localhost:5173"
     log_level: str = "INFO"
+    session_ttl_hours: int = 8
 
     @property
     def cors_origin_list(self) -> list[str]:
