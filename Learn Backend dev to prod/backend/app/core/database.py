@@ -1,9 +1,17 @@
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
 
-engine = create_async_engine(get_settings().database_url, pool_pre_ping=True)
+settings = get_settings()
+engine = create_async_engine(
+    settings.database_url,
+    pool_pre_ping=True,
+    # tests drive the app from several short-lived event loops; a pool would hand
+    # back asyncpg connections still bound to a closed loop
+    **({"poolclass": NullPool} if settings.environment == "test" else {}),
+)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 
