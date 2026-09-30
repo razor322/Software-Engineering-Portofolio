@@ -21,6 +21,12 @@ if config.config_file_name is not None:
 from app.core.base import Base  # noqa: E402
 from app.core.config import get_settings  # noqa: E402
 
+# import every module that defines models so autogenerate sees the full metadata
+import app.auth.models  # noqa: E402,F401
+import app.audit.models  # noqa: E402,F401
+import app.bookings.models  # noqa: E402,F401
+import app.rooms.models  # noqa: E402,F401
+
 target_metadata = Base.metadata
 
 # single source of truth for the DB URL: app settings (.env / environment)
@@ -32,6 +38,15 @@ config.set_main_option("sqlalchemy.url", get_settings().database_url.replace("%"
 # can be acquired:
 # my_important_option = config.get_main_option("my_important_option")
 # ... etc.
+
+
+def include_object(obj, name, type_, reflected, compare_to) -> bool:
+    """Autogenerate may only ever touch tables this application declares.
+
+    The development database is shared with another project, and without this
+    guard alembic happily proposes dropping tables it has never heard of.
+    """
+    return not (type_ == "table" and name not in Base.metadata.tables)
 
 
 def run_migrations_offline() -> None:
@@ -50,6 +65,7 @@ def run_migrations_offline() -> None:
     context.configure(
         url=url,
         target_metadata=target_metadata,
+        include_object=include_object,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -59,7 +75,9 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection, target_metadata=target_metadata, include_object=include_object
+    )
 
     with context.begin_transaction():
         context.run_migrations()
